@@ -768,31 +768,32 @@
       switch (this.type) {
         case 'spaceMarine': {
           ctx.shadowColor = '#4466ff';
-          ctx.fillStyle = '#2244aa';
+          ctx.shadowBlur = 14;
+          ctx.fillStyle = '#2255cc';
           ctx.beginPath();
           ctx.arc(sx, sy, 12, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillStyle = '#3355cc';
+          ctx.fillStyle = '#4477ee';
           ctx.beginPath();
           ctx.arc(sx, sy - 7, 7, 0, Math.PI * 2);
           ctx.fill();
-          ctx.fillStyle = '#7799cc';
+          ctx.fillStyle = '#88aaee';
           ctx.fillRect(sx + 8, sy - 2, 10, 4);
           break;
         }
         case 'terminator': {
           ctx.shadowColor = '#2233aa';
-          ctx.fillStyle = '#112266';
+          ctx.fillStyle = '#1a3399';
           ctx.fillRect(sx - 14, sy - 11, 28, 22);
-          ctx.fillStyle = '#2244aa';
+          ctx.fillStyle = '#3366cc';
           ctx.fillRect(sx - 18, sy - 13, 10, 8);
           ctx.fillRect(sx + 8,  sy - 13, 10, 8);
-          ctx.fillStyle = '#1a3377';
+          ctx.fillStyle = '#2255aa';
           ctx.fillRect(sx - 8, sy - 18, 16, 10);
           break;
         }
         case 'scout': {
-          ctx.shadowColor = '#3388dd';
+          ctx.shadowColor = '#55aaff';
           ctx.fillStyle = '#3388dd';
           ctx.beginPath();
           ctx.arc(sx, sy, 9, 0, Math.PI * 2);
@@ -808,7 +809,7 @@
         }
         case 'chaosWarrior': {
           ctx.shadowColor = '#ff3300';
-          ctx.fillStyle = '#aa2222';
+          ctx.fillStyle = '#cc2222';
           ctx.beginPath();
           const spk = 8;
           for (let i = 0; i < spk * 2; i++) {
@@ -821,7 +822,7 @@
           ctx.closePath();
           ctx.fill();
           ctx.shadowBlur = 0;
-          ctx.strokeStyle = '#cc4422';
+          ctx.strokeStyle = '#ee5522';
           ctx.lineWidth = 2;
           ctx.beginPath();
           ctx.moveTo(sx - 5, sy - 10); ctx.lineTo(sx - 8, sy - 19);
@@ -831,7 +832,7 @@
         }
         case 'chaosSorcerer': {
           ctx.shadowColor = '#aa00ff';
-          ctx.fillStyle = '#882255';
+          ctx.fillStyle = '#aa2266';
           ctx.beginPath();
           ctx.moveTo(sx, sy - 15);
           ctx.lineTo(sx - 11, sy + 8);
@@ -839,7 +840,7 @@
           ctx.closePath();
           ctx.fill();
           ctx.shadowBlur = 0;
-          ctx.strokeStyle = '#cc44aa';
+          ctx.strokeStyle = '#ee55cc';
           ctx.lineWidth = 2;
           ctx.beginPath();
           ctx.moveTo(sx + 10, sy + 6);
@@ -855,12 +856,12 @@
         }
         case 'chaosChosen': {
           ctx.shadowColor = '#990000';
-          ctx.fillStyle = '#661111';
+          ctx.fillStyle = '#881111';
           ctx.fillRect(sx - 15, sy - 13, 30, 26);
-          ctx.fillStyle = '#882222';
+          ctx.fillStyle = '#aa2222';
           ctx.fillRect(sx - 12, sy - 17, 24, 6);
           ctx.fillRect(sx - 12, sy + 8,  24, 6);
-          ctx.fillStyle = '#aa2222';
+          ctx.fillStyle = '#cc3333';
           ctx.fillRect(sx - 20, sy - 12, 8, 10);
           ctx.fillRect(sx + 12, sy - 12, 8, 10);
           break;
@@ -918,7 +919,7 @@
         this.faction     = 'player';
         this.maxHp       = 1000;
         this.hp          = 1000;
-        this.color       = '#1133aa';
+        this.color       = '#1a44cc';
         this.borderColor = '#4466ff';
         this.glowColor   = '#4466ff';
         this.label       = 'SM BASE';
@@ -927,7 +928,7 @@
         this.faction     = 'ai';
         this.maxHp       = 1000;
         this.hp          = 1000;
-        this.color       = '#aa1111';
+        this.color       = '#cc1111';
         this.borderColor = '#ff3333';
         this.glowColor   = '#ff3333';
         this.label       = 'CHAOS';
@@ -980,7 +981,7 @@
       const sy = this.y - camera.y;
 
       ctx.save();
-      ctx.shadowBlur   = 22;
+      ctx.shadowBlur   = 28;
       ctx.shadowColor  = this.glowColor;
       ctx.fillStyle    = this.color;
       ctx.fillRect(sx, sy, 80, 80);
@@ -1575,7 +1576,7 @@
     }
 
     _drawHints(ctx, panelY, W) {
-      ctx.fillStyle = '#4a5a6a';
+      ctx.fillStyle = '#6688aa';
       ctx.textAlign = 'center';
       ctx.font = '12px Courier New';
       ctx.textBaseline = 'top';
@@ -1703,17 +1704,17 @@
 
     _drawWaveNotification(ctx, game) {
       if (game.waveNotifyTimer <= 0) return;
-      const W = game.canvas.width;
       const alpha = Math.min(1, game.waveNotifyTimer);
+      const W = game.canvas.width;
       ctx.save();
       ctx.globalAlpha = alpha;
-      ctx.fillStyle = '#ff7700';
-      ctx.font = 'bold 19px Courier New';
+      ctx.font = 'bold 28px Courier New';
       ctx.textAlign = 'center';
-      ctx.textBaseline = 'top';
-      ctx.shadowBlur = 12;
+      ctx.textBaseline = 'middle';
+      ctx.shadowBlur = 20;
       ctx.shadowColor = '#ff4400';
-      ctx.fillText('\u26A0 Enemy Wave ' + game.waveNumber + ' spawned!', W / 2, 60);
+      ctx.fillStyle = '#ff8844';
+      ctx.fillText('⚔ WAVE ' + game.waveNumber + ' INCOMING! ⚔', W / 2, 80);
       ctx.restore();
     }
 
@@ -1846,7 +1847,9 @@
         { x: 250, y: 1740 }
       ];
       for (const s of starts) {
-        this.units.push(new Unit('spaceMarine', s.x, s.y, this));
+        const u = new Unit('spaceMarine', s.x, s.y, this);
+        u.selected = true;
+        this.units.push(u);
       }
     }
 
@@ -1873,6 +1876,9 @@
       this.aiBase      = new Building('aiBase',     1710, 210,  this);
       this.aiManager   = new AIManager(this);
       this.camera      = new Camera();
+      this.camera.x = this.playerBase.x + 40 - this.canvas.width / 2;
+      this.camera.y = this.playerBase.y + 40 - this.canvas.height / 2;
+      this.camera.clamp(this.canvas.width, this.canvas.height);
 
       _uidCounter = 0;
       this._spawnInitialUnits();
@@ -1977,7 +1983,7 @@
       ctx.globalAlpha = 1;
 
       // Grid lines
-      ctx.strokeStyle = '#1a2a1a';
+      ctx.strokeStyle = '#162616';
       ctx.lineWidth   = 0.5;
       const gx0 = Math.floor(camera.x / GRID_STEP) * GRID_STEP;
       const gy0 = Math.floor(camera.y / GRID_STEP) * GRID_STEP;
@@ -2027,6 +2033,10 @@
     }
 
     start() {
+      // Center camera on the player base
+      this.camera.x = this.playerBase.x + 40 - this.canvas.width / 2;
+      this.camera.y = this.playerBase.y + 40 - this.canvas.height / 2;
+      this.camera.clamp(this.canvas.width, this.canvas.height);
       requestAnimationFrame(ts => {
         this.lastTime = ts;
         this.gameLoop(ts);
