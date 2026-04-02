@@ -2,6 +2,8 @@
 
 A complete, single-file browser-based real-time strategy game. Open `index.html` in any modern browser — no server, no build tools, no dependencies required.
 
+![Space Marines vs Chaos Warriors RTS](https://github.com/user-attachments/assets/431a8761-98a1-454b-8d8c-1256eb4cf43c)
+
 ## How to Play
 
 Open `index.html` directly in a web browser.
