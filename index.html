@@ -1,0 +1,2063 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Space Marines vs Chaos Warriors</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0a0a1a; overflow: hidden; font-family: 'Courier New', monospace; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #overlay {
+      display: none;
+      position: fixed; top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.82);
+      z-index: 100;
+      justify-content: center;
+      align-items: center;
+    }
+    #overlay.active { display: flex; }
+    #overlay-box {
+      background: #111122;
+      border: 2px solid #4466ff;
+      padding: 50px 70px;
+      text-align: center;
+      color: #fff;
+    }
+    #overlay-title {
+      font-size: 52px;
+      font-weight: bold;
+      margin-bottom: 20px;
+      letter-spacing: 4px;
+    }
+    #overlay-score {
+      font-size: 24px;
+      margin-bottom: 30px;
+      color: #aaccff;
+    }
+    #restart-btn {
+      background: #1a3a6a;
+      color: #fff;
+      border: 2px solid #4466aa;
+      padding: 12px 40px;
+      font-size: 18px;
+      cursor: pointer;
+      font-family: 'Courier New', monospace;
+      letter-spacing: 2px;
+    }
+    #restart-btn:hover { background: #2a5a9a; border-color: #6688cc; }
+  </style>
+</head>
+<body>
+  <canvas id="gameCanvas"></canvas>
+  <div id="overlay">
+    <div id="overlay-box">
+      <div id="overlay-title"></div>
+      <div id="overlay-score"></div>
+      <button id="restart-btn">RESTART</button>
+    </div>
+  </div>
+
+  <script>
+  // ============================================================
+  // 1. CONSTANTS & CONFIG
+  // ============================================================
+  const WORLD_W = 2000;
+  const WORLD_H = 2000;
+  const GRID_STEP = 100;
+  const CAMERA_SPEED = 400;
+  const EDGE_MARGIN = 50;
+  const MAX_PARTICLES = 500;
+  const MINERAL_REGEN = 10;
+  const PANEL_H = 120;
+  const MINIMAP_W = 160;
+  const MINIMAP_H = 160;
+  const MINIMAP_MARGIN = 10;
+  const MAX_DELTA_TIME = 0.1;       // seconds — prevents physics from compounding during lag spikes or tab-blur
+  const BASE_WAVE_SIZE = 2;         // minimum units per wave
+  const WAVE_SCALE_FACTOR = 0.7;    // additional units per wave number
+  const MAX_WAVE_SIZE = 8;          // cap on units spawned per wave
+  const EPSILON = 0.0001;           // small value for near-zero length checks
+  const ATTACK_WAVE_RATIO = 0.6;    // fraction of idle AI units sent in each attack wave
+
+  const UNIT_DEFS = {
+    spaceMarine: {
+      name: 'Space Marine', faction: 'player',
+      hp: 100, speed: 80, damage: 15, range: 200, attackCooldown: 1.2,
+      aggroRange: 300, radius: 12, cost: 50, projectileType: 'laser'
+    },
+    terminator: {
+      name: 'Terminator', faction: 'player',
+      hp: 200, speed: 45, damage: 40, range: 50, attackCooldown: 2.0,
+      aggroRange: 75, radius: 14, cost: 150, projectileType: null
+    },
+    scout: {
+      name: 'Scout', faction: 'player',
+      hp: 60, speed: 120, damage: 10, range: 50, attackCooldown: 0.8,
+      aggroRange: 75, radius: 9, cost: 30, projectileType: null
+    },
+    chaosWarrior: {
+      name: 'Chaos Warrior', faction: 'ai',
+      hp: 120, speed: 70, damage: 18, range: 55, attackCooldown: 1.0,
+      aggroRange: 200, radius: 12, cost: 0, projectileType: null
+    },
+    chaosSorcerer: {
+      name: 'Chaos Sorcerer', faction: 'ai',
+      hp: 80, speed: 50, damage: 20, range: 220, attackCooldown: 1.5,
+      aggroRange: 330, radius: 10, cost: 0, projectileType: 'fireball'
+    },
+    chaosChosen: {
+      name: 'Chaos Chosen', faction: 'ai',
+      hp: 180, speed: 40, damage: 45, range: 55, attackCooldown: 2.2,
+      aggroRange: 180, radius: 15, cost: 0, projectileType: null
+    }
+  };
+
+  // ============================================================
+  // 2. UTILITY FUNCTIONS
+  // ============================================================
+  function dist(ax, ay, bx, by) {
+    const dx = bx - ax, dy = by - ay;
+    return Math.sqrt(dx * dx + dy * dy);
+  }
+
+  function normalize(dx, dy) {
+    const len = Math.sqrt(dx * dx + dy * dy);
+    if (len < EPSILON) return { x: 0, y: 0 };
+    return { x: dx / len, y: dy / len };
+  }
+
+  function clamp(val, lo, hi) {
+    return val < lo ? lo : val > hi ? hi : val;
+  }
+
+  function randRange(min, max) {
+    return min + Math.random() * (max - min);
+  }
+
+  function randInt(min, max) {
+    return Math.floor(min + Math.random() * (max - min + 1));
+  }
+
+  // ============================================================
+  // 3. PARTICLE SYSTEM
+  // ============================================================
+  class ParticleSystem {
+    constructor() {
+      this.pool = [];
+      for (let i = 0; i < MAX_PARTICLES; i++) {
+        this.pool.push({ x:0, y:0, vx:0, vy:0, life:0, maxLife:1, color:'#fff', size:2, active:false });
+      }
+    }
+
+    emit(x, y, color, count, spdMin, spdMax, lifeMin, lifeMax, szMin, szMax) {
+      let spawned = 0;
+      for (let i = 0; i < this.pool.length && spawned < count; i++) {
+        const p = this.pool[i];
+        if (p.active) continue;
+        const angle = Math.random() * Math.PI * 2;
+        const speed = randRange(spdMin, spdMax);
+        p.x = x; p.y = y;
+        p.vx = Math.cos(angle) * speed;
+        p.vy = Math.sin(angle) * speed;
+        p.life = randRange(lifeMin, lifeMax);
+        p.maxLife = p.life;
+        p.color = color;
+        p.size = randRange(szMin, szMax);
+        p.active = true;
+        spawned++;
+      }
+    }
+
+    update(delta) {
+      for (const p of this.pool) {
+        if (!p.active) continue;
+        p.x += p.vx * delta;
+        p.y += p.vy * delta;
+        p.vx *= 0.93;
+        p.vy *= 0.93;
+        p.life -= delta;
+        if (p.life <= 0) p.active = false;
+      }
+    }
+
+    draw(ctx, camera) {
+      for (const p of this.pool) {
+        if (!p.active) continue;
+        const sx = p.x - camera.x;
+        const sy = p.y - camera.y;
+        ctx.save();
+        ctx.globalAlpha = Math.max(0, p.life / p.maxLife);
+        ctx.fillStyle = p.color;
+        ctx.beginPath();
+        ctx.arc(sx, sy, p.size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+    }
+  }
+
+  // ============================================================
+  // 4. PROJECTILE SYSTEM
+  // ============================================================
+  class Projectile {
+    constructor(x, y, tx, ty, type, owner, damage) {
+      this.x = x; this.y = y;
+      this.type = type;
+      this.owner = owner;
+      this.damage = damage;
+      this.active = true;
+      this.wobbleTime = 0;
+
+      const dir = normalize(tx - x, ty - y);
+      this.angle = Math.atan2(ty - y, tx - x);
+
+      if (type === 'laser') {
+        this.speed = 350;
+        this.color = '#44aaff';
+      } else {
+        this.speed = 280;
+        this.color = '#ff6600';
+      }
+      this.vx = dir.x * this.speed;
+      this.vy = dir.y * this.speed;
+    }
+
+    update(delta, units, playerBase, aiBase, particles) {
+      if (!this.active) return;
+      this.x += this.vx * delta;
+      this.y += this.vy * delta;
+      this.wobbleTime += delta;
+
+      if (this.x < 0 || this.x > WORLD_W || this.y < 0 || this.y > WORLD_H) {
+        this.active = false;
+        return;
+      }
+
+      const enemyFaction = this.owner.faction === 'player' ? 'ai' : 'player';
+
+      for (const unit of units) {
+        if (!unit.active || unit.state === 'dead') continue;
+        if (unit.faction !== enemyFaction) continue;
+        const d = dist(this.x, this.y, unit.x, unit.y);
+        if (d < unit.radius + 5) {
+          unit.takeDamage(this.damage, this.owner);
+          particles.emit(this.x, this.y, this.color, 5, 30, 110, 0.2, 0.7, 1, 3);
+          this.active = false;
+          return;
+        }
+      }
+
+      // Check buildings
+      if (this.owner.faction === 'player' && aiBase && aiBase.active) {
+        const bx = aiBase.x + 40, by = aiBase.y + 40;
+        if (dist(this.x, this.y, bx, by) < 52) {
+          aiBase.takeDamage(this.damage, this.owner);
+          if (this.owner.game) this.owner.game.score += 1; // per-hit reward; full bonus on base destruction
+          particles.emit(this.x, this.y, '#ff4400', 5, 30, 110, 0.2, 0.7, 1, 3);
+          this.active = false;
+          return;
+        }
+      } else if (this.owner.faction === 'ai' && playerBase && playerBase.active) {
+        const bx = playerBase.x + 40, by = playerBase.y + 40;
+        if (dist(this.x, this.y, bx, by) < 52) {
+          playerBase.takeDamage(this.damage, this.owner);
+          particles.emit(this.x, this.y, '#4488ff', 5, 30, 110, 0.2, 0.7, 1, 3);
+          this.active = false;
+          return;
+        }
+      }
+    }
+
+    draw(ctx, camera) {
+      if (!this.active) return;
+      const sx = this.x - camera.x;
+      const sy = this.y - camera.y;
+
+      ctx.save();
+      if (this.type === 'laser') {
+        ctx.translate(sx, sy);
+        ctx.rotate(this.angle);
+        ctx.shadowBlur = 8;
+        ctx.shadowColor = '#44aaff';
+        ctx.fillStyle = '#44aaff';
+        ctx.fillRect(-6, -1.5, 12, 3);
+        ctx.fillStyle = '#aaddff';
+        ctx.fillRect(-4, -0.5, 8, 1);
+      } else {
+        const wobble = Math.sin(this.wobbleTime * 15) * 2;
+        const perpX = sx - Math.sin(this.angle) * wobble;
+        const perpY = sy + Math.cos(this.angle) * wobble;
+        ctx.shadowBlur = 14;
+        ctx.shadowColor = '#ff6600';
+        ctx.fillStyle = '#ff6600';
+        ctx.beginPath();
+        ctx.arc(perpX, perpY, 5, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = '#ffaa00';
+        ctx.beginPath();
+        ctx.arc(perpX, perpY, 2.5, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.restore();
+    }
+  }
+
+  // ============================================================
+  // 5. OBSTACLE SYSTEM
+  // ============================================================
+  class ObstacleSystem {
+    constructor() {
+      this.obstacles = [];
+      this._generate();
+    }
+
+    _generate() {
+      const safeZones = [
+        { x: 200, y: 1700, r: 220 },
+        { x: 1750, y: 250,  r: 220 }
+      ];
+      let attempts = 0;
+      while (this.obstacles.length < 18 && attempts < 600) {
+        attempts++;
+        const x = randRange(80, WORLD_W - 80);
+        const y = randRange(80, WORLD_H - 80);
+        const radius = randRange(30, 60);
+
+        let bad = false;
+        for (const z of safeZones) {
+          if (dist(x, y, z.x, z.y) < z.r + radius) { bad = true; break; }
+        }
+        if (bad) continue;
+
+        for (const o of this.obstacles) {
+          if (dist(x, y, o.x, o.y) < o.radius + radius + 25) { bad = true; break; }
+        }
+        if (bad) continue;
+
+        const numPts = randInt(6, 9);
+        const points = [];
+        for (let i = 0; i < numPts; i++) {
+          const angle = (i / numPts) * Math.PI * 2;
+          const r = radius * randRange(0.65, 1.35);
+          points.push({ x: Math.cos(angle) * r, y: Math.sin(angle) * r });
+        }
+        this.obstacles.push({ x, y, radius, points });
+      }
+    }
+
+    resolveCollision(unit) {
+      for (const o of this.obstacles) {
+        const d = dist(unit.x, unit.y, o.x, o.y);
+        const minD = o.radius + unit.radius;
+        if (d < minD) {
+          if (d < 0.001) { unit.x += 1; continue; }
+          const nx = (unit.x - o.x) / d;
+          const ny = (unit.y - o.y) / d;
+          unit.x = o.x + nx * minD;
+          unit.y = o.y + ny * minD;
+        }
+      }
+    }
+
+    isBlocked(x, y, radius) {
+      for (const o of this.obstacles) {
+        if (dist(x, y, o.x, o.y) < o.radius + radius) return true;
+      }
+      return false;
+    }
+
+    draw(ctx, camera) {
+      for (const o of this.obstacles) {
+        const sx = o.x - camera.x;
+        const sy = o.y - camera.y;
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.beginPath();
+        ctx.moveTo(o.points[0].x, o.points[0].y);
+        for (let i = 1; i < o.points.length; i++) {
+          ctx.lineTo(o.points[i].x, o.points[i].y);
+        }
+        ctx.closePath();
+        ctx.fillStyle = '#2a2a2a';
+        ctx.fill();
+        ctx.strokeStyle = '#555555';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.restore();
+      }
+    }
+  }
+
+  // ============================================================
+  // 6. SPATIAL GRID
+  // ============================================================
+  class SpatialGrid {
+    constructor(cellSize) {
+      this.cellSize = cellSize;
+      this.cells = new Map();
+    }
+
+    _key(cx, cy) { return cx + ',' + cy; }
+
+    clear() { this.cells.clear(); }
+
+    insert(unit) {
+      const cx = Math.floor(unit.x / this.cellSize);
+      const cy = Math.floor(unit.y / this.cellSize);
+      const k = this._key(cx, cy);
+      if (!this.cells.has(k)) this.cells.set(k, []);
+      this.cells.get(k).push(unit);
+    }
+
+    query(x, y, range) {
+      const result = [];
+      const minCx = Math.floor((x - range) / this.cellSize);
+      const maxCx = Math.floor((x + range) / this.cellSize);
+      const minCy = Math.floor((y - range) / this.cellSize);
+      const maxCy = Math.floor((y + range) / this.cellSize);
+      for (let cx = minCx; cx <= maxCx; cx++) {
+        for (let cy = minCy; cy <= maxCy; cy++) {
+          const bucket = this.cells.get(this._key(cx, cy));
+          if (bucket) for (const u of bucket) result.push(u);
+        }
+      }
+      return result;
+    }
+  }
+
+  // ============================================================
+  // 7. UNIT CLASS
+  // ============================================================
+  let _uidCounter = 0;
+
+  class Unit {
+    constructor(type, x, y, game) {
+      this.id = _uidCounter++;
+      this.type = type;
+      this.game = game;
+
+      const def = UNIT_DEFS[type];
+      this.name          = def.name;
+      this.faction       = def.faction;
+      this.maxHp         = def.hp;
+      this.hp            = def.hp;
+      this.speed         = def.speed;
+      this.damage        = def.damage;
+      this.range         = def.range;
+      this.attackCooldown = def.attackCooldown;
+      this.aggroRange    = def.aggroRange;
+      this.radius        = def.radius;
+      this.projectileType = def.projectileType;
+
+      this.x = x; this.y = y;
+
+      this.state          = 'idle';
+      this.target         = null;   // enemy unit
+      this.targetBuilding = null;   // enemy building
+      this.waypoint       = null;   // {x,y}
+
+      this.attackTimer     = 0;
+      this.attackAnimTimer = 0;
+      this.hitFlashTimer   = 0;
+      this.deathTimer      = 0;
+      this.animTime        = Math.random() * Math.PI * 2;
+      this.alpha           = 1;
+      this.active          = true;
+      this.selected        = false;
+
+      this.drawOffsetX = 0;
+      this.drawOffsetY = 0;
+    }
+
+    update(delta, spatialGrid, obstacles, projectiles, particles) {
+      if (!this.active) return;
+
+      this.animTime        += delta;
+      this.attackTimer      = Math.max(0, this.attackTimer - delta);
+      this.hitFlashTimer    = Math.max(0, this.hitFlashTimer - delta);
+      this.attackAnimTimer  = Math.max(0, this.attackAnimTimer - delta);
+
+      if (this.state === 'dead') {
+        this.deathTimer += delta;
+        this.alpha = Math.max(0, 1 - this.deathTimer / 0.8);
+        if (this.alpha <= 0) this.active = false;
+        return;
+      }
+
+      // Validate current unit target
+      if (this.target && (!this.target.active || this.target.state === 'dead')) {
+        this.target = null;
+        if (this.state === 'chase' || this.state === 'attack') {
+          this.state = 'idle';
+        }
+      }
+
+      // Validate building target
+      if (this.targetBuilding && !this.targetBuilding.active) {
+        this.targetBuilding = null;
+        if (this.state === 'attack') this.state = 'idle';
+      }
+
+      // Auto-attack enemy base when in proximity
+      this._checkBaseAttack();
+
+      switch (this.state) {
+        case 'idle': {
+          this.drawOffsetY = Math.sin(this.animTime * 2) * 2;
+          this.drawOffsetX = 0;
+          const near = spatialGrid.query(this.x, this.y, this.aggroRange);
+          for (const u of near) {
+            if (u === this || u.faction === this.faction || !u.active || u.state === 'dead') continue;
+            if (dist(this.x, this.y, u.x, u.y) <= this.aggroRange) {
+              this.target = u;
+              this.targetBuilding = null;
+              this.state = 'chase';
+              break;
+            }
+          }
+          break;
+        }
+
+        case 'moving': {
+          this.drawOffsetX = Math.sin(this.animTime * 8) * 3;
+          this.drawOffsetY = 0;
+          if (this.waypoint) {
+            const arrived = this._moveToward(this.waypoint.x, this.waypoint.y, delta, obstacles);
+            if (arrived) {
+              this.waypoint = null;
+              // If we had a building target and arrived, attempt attack
+              if (this.targetBuilding) {
+                this.state = 'attack';
+              } else {
+                this.state = 'idle';
+              }
+            }
+          } else {
+            this.state = 'idle';
+          }
+          // Scan for enemy units while moving
+          if (this.state === 'moving' && !this.target) {
+            const near2 = spatialGrid.query(this.x, this.y, this.aggroRange);
+            for (const u of near2) {
+              if (u === this || u.faction === this.faction || !u.active || u.state === 'dead') continue;
+              if (dist(this.x, this.y, u.x, u.y) <= this.aggroRange) {
+                this.target = u;
+                this.targetBuilding = null;
+                this.state = 'chase';
+                this.waypoint = null;
+                break;
+              }
+            }
+          }
+          break;
+        }
+
+        case 'chase': {
+          this.drawOffsetX = Math.sin(this.animTime * 8) * 3;
+          this.drawOffsetY = 0;
+          if (!this.target || !this.target.active || this.target.state === 'dead') {
+            this.target = null;
+            this.state = 'idle';
+            break;
+          }
+          const dChase = dist(this.x, this.y, this.target.x, this.target.y);
+          if (dChase <= this.range + this.target.radius) {
+            this.state = 'attack';
+          } else {
+            this._moveToward(this.target.x, this.target.y, delta, obstacles);
+          }
+          break;
+        }
+
+        case 'attack': {
+          this.drawOffsetX = 0;
+          this.drawOffsetY = 0;
+          if (this.targetBuilding) {
+            const bx = this.targetBuilding.x + 40;
+            const by = this.targetBuilding.y + 40;
+            const dBld = dist(this.x, this.y, bx, by);
+            if (dBld > this.range + 110) {
+              // Move closer to building
+              this.waypoint = { x: bx, y: by };
+              this.state = 'moving';
+            } else if (this.attackTimer <= 0) {
+              this._attackBuilding(this.targetBuilding, projectiles, particles);
+              this.attackTimer     = this.attackCooldown;
+              this.attackAnimTimer = 0.25;
+            }
+          } else {
+            if (!this.target || !this.target.active || this.target.state === 'dead') {
+              this.target = null;
+              this.state = 'idle';
+              break;
+            }
+            const dAtk = dist(this.x, this.y, this.target.x, this.target.y);
+            if (dAtk > this.range + this.target.radius + 12) {
+              this.state = 'chase';
+            } else if (this.attackTimer <= 0) {
+              this._attackUnit(this.target, projectiles, particles);
+              this.attackTimer     = this.attackCooldown;
+              this.attackAnimTimer = 0.25;
+            }
+          }
+          break;
+        }
+      }
+
+      // Lunge offset during attack animation
+      if (this.attackAnimTimer > 0) {
+        let lungeTargetX = 0, lungeTargetY = 0;
+        if (this.target && this.target.active) {
+          lungeTargetX = this.target.x; lungeTargetY = this.target.y;
+        } else if (this.targetBuilding && this.targetBuilding.active) {
+          lungeTargetX = this.targetBuilding.x + 40;
+          lungeTargetY = this.targetBuilding.y + 40;
+        }
+        if (lungeTargetX !== 0 || lungeTargetY !== 0) {
+          const ld = normalize(lungeTargetX - this.x, lungeTargetY - this.y);
+          const amt = this.attackAnimTimer * 14;
+          this.drawOffsetX = ld.x * amt;
+          this.drawOffsetY = ld.y * amt;
+        }
+      }
+
+      // Unit separation
+      const neighbors = spatialGrid.query(this.x, this.y, this.radius * 4);
+      for (const other of neighbors) {
+        if (other === this || !other.active || other.state === 'dead') continue;
+        const sd = dist(this.x, this.y, other.x, other.y);
+        const minD = this.radius + other.radius + 2;
+        if (sd < minD && sd > 0.001) {
+          const overlap = (minD - sd) * 0.5;
+          const nx = (this.x - other.x) / sd;
+          const ny = (this.y - other.y) / sd;
+          this.x += nx * overlap;
+          this.y += ny * overlap;
+        }
+      }
+
+      // Obstacle collision
+      obstacles.resolveCollision(this);
+
+      // World bounds
+      this.x = clamp(this.x, this.radius, WORLD_W - this.radius);
+      this.y = clamp(this.y, this.radius, WORLD_H - this.radius);
+    }
+
+    _checkBaseAttack() {
+      const g = this.game;
+      if (this.state !== 'idle' && this.state !== 'moving') return;
+      if (this.faction === 'player' && g.aiBase && g.aiBase.active) {
+        const bx = g.aiBase.x + 40, by = g.aiBase.y + 40;
+        if (dist(this.x, this.y, bx, by) <= this.range + 80) {
+          this.targetBuilding = g.aiBase;
+          this.target = null;
+          this.waypoint = null;
+          this.state = 'attack';
+        }
+      } else if (this.faction === 'ai' && g.playerBase && g.playerBase.active) {
+        const bx = g.playerBase.x + 40, by = g.playerBase.y + 40;
+        if (dist(this.x, this.y, bx, by) <= this.range + 80) {
+          this.targetBuilding = g.playerBase;
+          this.target = null;
+          this.waypoint = null;
+          this.state = 'attack';
+        }
+      }
+    }
+
+    _moveToward(tx, ty, delta, obstacles) {
+      const d = dist(this.x, this.y, tx, ty);
+      if (d < 4) return true;
+      const dir = normalize(tx - this.x, ty - this.y);
+      let nx = this.x + dir.x * this.speed * delta;
+      let ny = this.y + dir.y * this.speed * delta;
+
+      if (obstacles.isBlocked(nx, ny, this.radius)) {
+        const perpL = { x: -dir.y, y: dir.x };
+        const perpR = { x: dir.y, y: -dir.x };
+        const lx = this.x + perpL.x * this.speed * delta;
+        const ly = this.y + perpL.y * this.speed * delta;
+        const rx = this.x + perpR.x * this.speed * delta;
+        const ry = this.y + perpR.y * this.speed * delta;
+        if (!obstacles.isBlocked(lx, ly, this.radius)) {
+          nx = lx; ny = ly;
+        } else if (!obstacles.isBlocked(rx, ry, this.radius)) {
+          nx = rx; ny = ry;
+        } else {
+          return false;
+        }
+      }
+      this.x = nx; this.y = ny;
+      return false;
+    }
+
+    _attackUnit(target, projectiles, particles) {
+      if (this.projectileType) {
+        projectiles.push(new Projectile(
+          this.x, this.y, target.x, target.y,
+          this.projectileType, this, this.damage
+        ));
+      } else {
+        target.takeDamage(this.damage, this);
+        const col = this.faction === 'player' ? '#44aaff' : '#ff3300';
+        particles.emit(target.x, target.y, col, 5, 20, 90, 0.15, 0.5, 1, 3);
+      }
+    }
+
+    _attackBuilding(building, projectiles, particles) {
+      if (this.projectileType) {
+        projectiles.push(new Projectile(
+          this.x, this.y, building.x + 40, building.y + 40,
+          this.projectileType, this, this.damage
+        ));
+      } else {
+        building.takeDamage(this.damage, this);
+        const col = this.faction === 'player' ? '#44aaff' : '#ff3300';
+        particles.emit(building.x + 40, building.y + 40, col, 5, 20, 90, 0.15, 0.5, 1, 3);
+      }
+    }
+
+    takeDamage(amount, attacker) {
+      if (this.state === 'dead') return;
+      this.hp -= amount;
+      this.hitFlashTimer = 0.2;
+      if (this.hp <= 0) { this.hp = 0; this.die(attacker); }
+    }
+
+    die(killer) {
+      this.state = 'dead';
+      this.deathTimer = 0;
+      this.selected = false;
+      this.target = null;
+      this.targetBuilding = null;
+      if (killer && killer.faction === 'player') {
+        this.game.score    += 10;
+        this.game.minerals += 15;
+      }
+      const col = this.faction === 'player' ? '#2244aa' : '#aa2222';
+      this.game.particles.emit(this.x, this.y, col,      8, 30, 130, 0.4, 1.2, 1, 4);
+      this.game.particles.emit(this.x, this.y, '#ffffff', 4, 50, 160, 0.2, 0.7, 1, 2);
+    }
+
+    draw(ctx, camera) {
+      if (!this.active) return;
+      const sx = this.x - camera.x + this.drawOffsetX;
+      const sy = this.y - camera.y + this.drawOffsetY;
+
+      ctx.save();
+      ctx.globalAlpha = this.alpha;
+
+      // Selection ring
+      if (this.selected && this.state !== 'dead') {
+        ctx.save();
+        ctx.strokeStyle = '#44ff88';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 4]);
+        ctx.lineDashOffset = -(this.animTime * 22) % 16;
+        ctx.beginPath();
+        ctx.arc(sx, sy, this.radius + 5, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // Draw unit shape
+      ctx.shadowBlur = 10;
+      switch (this.type) {
+        case 'spaceMarine': {
+          ctx.shadowColor = '#4466ff';
+          ctx.shadowBlur = 14;
+          ctx.fillStyle = '#2255cc';
+          ctx.beginPath();
+          ctx.arc(sx, sy, 12, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#4477ee';
+          ctx.beginPath();
+          ctx.arc(sx, sy - 7, 7, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.fillStyle = '#88aaee';
+          ctx.fillRect(sx + 8, sy - 2, 10, 4);
+          break;
+        }
+        case 'terminator': {
+          ctx.shadowColor = '#2233aa';
+          ctx.fillStyle = '#1a3399';
+          ctx.fillRect(sx - 14, sy - 11, 28, 22);
+          ctx.fillStyle = '#3366cc';
+          ctx.fillRect(sx - 18, sy - 13, 10, 8);
+          ctx.fillRect(sx + 8,  sy - 13, 10, 8);
+          ctx.fillStyle = '#2255aa';
+          ctx.fillRect(sx - 8, sy - 18, 16, 10);
+          break;
+        }
+        case 'scout': {
+          ctx.shadowColor = '#55aaff';
+          ctx.fillStyle = '#3388dd';
+          ctx.beginPath();
+          ctx.arc(sx, sy, 9, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.strokeStyle = '#55aaff';
+          ctx.lineWidth = 2;
+          ctx.shadowBlur = 0;
+          ctx.beginPath();
+          ctx.moveTo(sx - 6, sy);
+          ctx.lineTo(sx + 6, sy);
+          ctx.stroke();
+          break;
+        }
+        case 'chaosWarrior': {
+          ctx.shadowColor = '#ff3300';
+          ctx.fillStyle = '#cc2222';
+          ctx.beginPath();
+          const spk = 8;
+          for (let i = 0; i < spk * 2; i++) {
+            const angle = (i / (spk * 2)) * Math.PI * 2 - Math.PI / 2;
+            const r = i % 2 === 0 ? 13 : 7;
+            const px = sx + Math.cos(angle) * r;
+            const py = sy + Math.sin(angle) * r;
+            i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+          }
+          ctx.closePath();
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = '#ee5522';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(sx - 5, sy - 10); ctx.lineTo(sx - 8, sy - 19);
+          ctx.moveTo(sx + 5, sy - 10); ctx.lineTo(sx + 8, sy - 19);
+          ctx.stroke();
+          break;
+        }
+        case 'chaosSorcerer': {
+          ctx.shadowColor = '#aa00ff';
+          ctx.fillStyle = '#aa2266';
+          ctx.beginPath();
+          ctx.moveTo(sx, sy - 15);
+          ctx.lineTo(sx - 11, sy + 8);
+          ctx.lineTo(sx + 11, sy + 8);
+          ctx.closePath();
+          ctx.fill();
+          ctx.shadowBlur = 0;
+          ctx.strokeStyle = '#ee55cc';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(sx + 10, sy + 6);
+          ctx.lineTo(sx + 14, sy - 10);
+          ctx.stroke();
+          ctx.shadowBlur = 16;
+          ctx.shadowColor = '#aa00ff';
+          ctx.fillStyle = '#ff00ff';
+          ctx.beginPath();
+          ctx.arc(sx + 14, sy - 13, 4, 0, Math.PI * 2);
+          ctx.fill();
+          break;
+        }
+        case 'chaosChosen': {
+          ctx.shadowColor = '#990000';
+          ctx.fillStyle = '#881111';
+          ctx.fillRect(sx - 15, sy - 13, 30, 26);
+          ctx.fillStyle = '#aa2222';
+          ctx.fillRect(sx - 12, sy - 17, 24, 6);
+          ctx.fillRect(sx - 12, sy + 8,  24, 6);
+          ctx.fillStyle = '#cc3333';
+          ctx.fillRect(sx - 20, sy - 12, 8, 10);
+          ctx.fillRect(sx + 12, sy - 12, 8, 10);
+          break;
+        }
+      }
+
+      ctx.restore();
+
+      // Hit flash overlay
+      if (this.hitFlashTimer > 0 && this.state !== 'dead') {
+        ctx.save();
+        ctx.globalAlpha = this.alpha * (this.hitFlashTimer / 0.2) * 0.55;
+        ctx.fillStyle = '#ff2222';
+        ctx.beginPath();
+        ctx.arc(this.x - camera.x, this.y - camera.y, this.radius + 2, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.restore();
+      }
+
+      // Health bar
+      if (this.state !== 'dead') {
+        this._drawHealthBar(ctx,
+          this.x - camera.x,
+          this.y - camera.y);
+      }
+    }
+
+    _drawHealthBar(ctx, sx, sy) {
+      const W = 30, H = 4;
+      const bx = sx - W / 2;
+      const by = sy - this.radius - 12;
+      const ratio = this.hp / this.maxHp;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(bx, by, W, H);
+      ctx.fillStyle = ratio > 0.66 ? '#00cc44' : ratio > 0.33 ? '#ffcc00' : '#cc2200';
+      ctx.fillRect(bx, by, W * ratio, H);
+    }
+  }
+
+  // ============================================================
+  // 8. BUILDING CLASS
+  // ============================================================
+  class Building {
+    constructor(type, x, y, game) {
+      this.type    = type;
+      this.x       = x;
+      this.y       = y;
+      this.game    = game;
+      this.active  = true;
+      this.selected = false;
+      this.animTime = 0;
+
+      if (type === 'playerBase') {
+        this.name        = 'SM Base';
+        this.faction     = 'player';
+        this.maxHp       = 1000;
+        this.hp          = 1000;
+        this.color       = '#1a44cc';
+        this.borderColor = '#4466ff';
+        this.glowColor   = '#4466ff';
+        this.label       = 'SM BASE';
+      } else {
+        this.name        = 'Chaos Base';
+        this.faction     = 'ai';
+        this.maxHp       = 1000;
+        this.hp          = 1000;
+        this.color       = '#cc1111';
+        this.borderColor = '#ff3333';
+        this.glowColor   = '#ff3333';
+        this.label       = 'CHAOS';
+      }
+
+      this.productionQueue = [];
+      this.productionTimer = 0;
+      this.productionTime  = 8;
+    }
+
+    update(delta) {
+      if (!this.active) return;
+      this.animTime += delta;
+      if (this.faction === 'player' && this.productionQueue.length > 0) {
+        this.productionTimer += delta;
+        if (this.productionTimer >= this.productionTime) {
+          this.productionTimer = 0;
+          this._spawnUnit(this.productionQueue.shift());
+        }
+      }
+    }
+
+    startProduction(unitType) {
+      const def = UNIT_DEFS[unitType];
+      if (this.game.minerals < def.cost) return false;
+      this.game.minerals -= def.cost;
+      this.productionQueue.push(unitType);
+      return true;
+    }
+
+    _spawnUnit(unitType) {
+      const sx = clamp(this.x + 40 + randRange(-70, 70), 50, WORLD_W - 50);
+      const sy = clamp(this.y + 40 + randRange(-70, 70), 50, WORLD_H - 50);
+      this.game.units.push(new Unit(unitType, sx, sy, this.game));
+    }
+
+    takeDamage(amount, attacker) {
+      this.hp -= amount;
+      if (this.hp <= 0) {
+        this.hp = 0;
+        this.active = false;
+        this.game.particles.emit(this.x + 40, this.y + 40, this.faction === 'player' ? '#2244aa' : '#aa2222', 20, 50, 200, 0.5, 1.5, 2, 6);
+        this.game.particles.emit(this.x + 40, this.y + 40, '#ff8800', 15, 40, 180, 0.5, 1.5, 2, 5);
+      }
+    }
+
+    draw(ctx, camera) {
+      if (!this.active) return;
+      const sx = this.x - camera.x;
+      const sy = this.y - camera.y;
+
+      ctx.save();
+      ctx.shadowBlur   = 28;
+      ctx.shadowColor  = this.glowColor;
+      ctx.fillStyle    = this.color;
+      ctx.fillRect(sx, sy, 80, 80);
+
+      ctx.strokeStyle  = this.borderColor;
+      ctx.lineWidth    = 3;
+      ctx.strokeRect(sx, sy, 80, 80);
+
+      ctx.shadowBlur = 0;
+      ctx.globalAlpha = 0.35;
+      ctx.strokeStyle  = this.borderColor;
+      ctx.lineWidth = 1;
+      ctx.strokeRect(sx + 5, sy + 5, 70, 70);
+      ctx.globalAlpha = 1;
+
+      // Faction emblem
+      if (this.faction === 'player') {
+        ctx.fillStyle = '#4466ff';
+        ctx.shadowBlur = 8; ctx.shadowColor = '#4466ff';
+        ctx.beginPath();
+        ctx.arc(sx + 40, sy + 30, 13, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.fillStyle = '#aaccff';
+        ctx.font = 'bold 14px Courier New';
+        ctx.textAlign = 'center';
+        ctx.fillText('Ψ', sx + 40, sy + 35);
+      } else {
+        ctx.fillStyle = '#ff3333';
+        ctx.shadowBlur = 8; ctx.shadowColor = '#ff3333';
+        ctx.beginPath();
+        for (let i = 0; i < 16; i++) {
+          const angle = (i / 16) * Math.PI * 2;
+          const r = i % 2 === 0 ? 13 : 6;
+          const px = sx + 40 + Math.cos(angle) * r;
+          const py = sy + 30 + Math.sin(angle) * r;
+          i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+        }
+        ctx.closePath();
+        ctx.fill();
+        ctx.shadowBlur = 0;
+      }
+
+      ctx.fillStyle = '#ffffff';
+      ctx.font = 'bold 9px Courier New';
+      ctx.textAlign = 'center';
+      ctx.shadowBlur = 0;
+      ctx.fillText(this.label, sx + 40, sy + 57);
+
+      // Selection border
+      if (this.selected) {
+        ctx.strokeStyle = '#44ff88';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([5, 5]);
+        ctx.lineDashOffset = -(this.animTime * 16) % 20;
+        ctx.strokeRect(sx - 3, sy - 3, 86, 86);
+        ctx.setLineDash([]);
+      }
+
+      ctx.restore();
+
+      this._drawHealthBar(ctx, sx, sy);
+    }
+
+    _drawHealthBar(ctx, sx, sy) {
+      const W = 80, H = 6;
+      const by = sy - 16;
+      const ratio = this.hp / this.maxHp;
+      ctx.fillStyle = '#333';
+      ctx.fillRect(sx, by, W, H);
+      ctx.fillStyle = ratio > 0.66 ? '#00cc44' : ratio > 0.33 ? '#ffcc00' : '#cc2200';
+      ctx.fillRect(sx, by, W * ratio, H);
+
+      // Production progress bar (player base only)
+      if (this.faction === 'player' && this.productionQueue.length > 0) {
+        const prodRatio = this.productionTimer / this.productionTime;
+        ctx.fillStyle = '#222';
+        ctx.fillRect(sx, by + 8, W, 3);
+        ctx.fillStyle = '#44aaff';
+        ctx.fillRect(sx, by + 8, W * prodRatio, 3);
+      }
+    }
+  }
+
+  // ============================================================
+  // 9. AI MANAGER
+  // ============================================================
+  class AIManager {
+    constructor(game) {
+      this.game          = game;
+      this.spawnTimer    = 0;
+      this.firstWave     = 15;
+      this.spawnInterval = 30;
+      this.waveNumber    = 0;
+      this.attackTimer   = 0;
+      this.attackInterval = 25;
+      this.controlTimer  = 0;
+      this.firstDone     = false;
+    }
+
+    update(delta) {
+      this.spawnTimer  += delta;
+      this.attackTimer += delta;
+      this.controlTimer += delta;
+
+      const spawnThresh = this.firstDone ? this.spawnInterval : this.firstWave;
+      if (this.spawnTimer >= spawnThresh) {
+        this.spawnTimer = 0;
+        this.firstDone  = true;
+        this.spawnWave();
+      }
+
+      if (this.attackTimer >= this.attackInterval) {
+        this.attackTimer = 0;
+        this.launchAttackWave();
+      }
+
+      if (this.controlTimer >= 5) {
+        this.controlTimer = 0;
+        this.controlUnits();
+      }
+    }
+
+    spawnWave() {
+      this.waveNumber++;
+      const count = Math.min(BASE_WAVE_SIZE + Math.floor(this.waveNumber * WAVE_SCALE_FACTOR), MAX_WAVE_SIZE);
+      const base  = this.game.aiBase;
+      for (let i = 0; i < count; i++) {
+        const roll = Math.random();
+        const type = roll < 0.5 ? 'chaosWarrior' : roll < 0.8 ? 'chaosSorcerer' : 'chaosChosen';
+        const sx = clamp(base.x + 40 + randRange(-90, 90), 50, WORLD_W - 50);
+        const sy = clamp(base.y + 40 + randRange(-90, 90), 50, WORLD_H - 50);
+        this.game.units.push(new Unit(type, sx, sy, this.game));
+      }
+      this.game.waveNotifyTimer = 3.0;
+      this.game.waveNumber      = this.waveNumber;
+    }
+
+    launchAttackWave() {
+      const aiIdle = this.game.units.filter(u =>
+        u.faction === 'ai' && u.active && u.state === 'idle'
+      );
+      const toSend = Math.ceil(aiIdle.length * ATTACK_WAVE_RATIO);
+      const pb = this.game.playerBase;
+      for (let i = 0; i < toSend; i++) {
+        const u = aiIdle[i];
+        u.waypoint = {
+          x: pb.x + 40 + randRange(-60, 60),
+          y: pb.y + 40 + randRange(-60, 60)
+        };
+        u.targetBuilding = pb;
+        u.target = null;
+        u.state = 'moving';
+      }
+    }
+
+    controlUnits() {
+      const pb = this.game.playerBase;
+      const aiUnits = this.game.units.filter(u =>
+        u.faction === 'ai' && u.active && u.state === 'idle'
+      );
+      for (const u of aiUnits) {
+        const d = dist(u.x, u.y, pb.x + 40, pb.y + 40);
+        if (d < 600 && Math.random() < 0.35) {
+          u.waypoint = {
+            x: pb.x + 40 + randRange(-70, 70),
+            y: pb.y + 40 + randRange(-70, 70)
+          };
+          u.targetBuilding = pb;
+          u.target = null;
+          u.state = 'moving';
+        }
+      }
+    }
+  }
+
+  // ============================================================
+  // 10. INPUT HANDLER
+  // ============================================================
+  class InputHandler {
+    constructor(game) {
+      this.game          = game;
+      this.keys          = {};
+      this.mouseX        = -999;   // placeholder; edge-scroll is gated by mouseOnCanvas
+      this.mouseY        = -999;
+      this.mouseOnCanvas = false;  // prevents edge-scroll until the cursor enters the canvas
+      this.shiftHeld     = false;
+      this.isDragging    = false;
+      this.dragStart     = null;
+      this.dragEnd       = null;
+      this._bind();
+    }
+
+    _getCanvasPos(e) {
+      const rect   = this.game.canvas.getBoundingClientRect();
+      const scaleX = this.game.canvas.width  / rect.width;
+      const scaleY = this.game.canvas.height / rect.height;
+      return {
+        x: (e.clientX - rect.left) * scaleX,
+        y: (e.clientY - rect.top)  * scaleY
+      };
+    }
+
+    _bind() {
+      window.addEventListener('keydown', e => {
+        this.keys[e.key] = true;
+        this.shiftHeld = e.shiftKey;
+        if (e.key === 'Escape') this.game.deselectAll();
+      });
+      window.addEventListener('keyup', e => {
+        this.keys[e.key] = false;
+        this.shiftHeld = e.shiftKey;
+      });
+
+      const cv = this.game.canvas;
+
+      cv.addEventListener('mouseenter', () => { this.mouseOnCanvas = true; });
+      cv.addEventListener('mouseleave', () => { this.mouseOnCanvas = false; });
+
+      cv.addEventListener('mousemove', e => {
+        const pos = this._getCanvasPos(e);
+        this.mouseX = pos.x;
+        this.mouseY = pos.y;
+        if (e.buttons === 1 && this.dragStart) {
+          const dx = this.mouseX - this.dragStart.x;
+          const dy = this.mouseY - this.dragStart.y;
+          if (Math.sqrt(dx * dx + dy * dy) > 5) this.isDragging = true;
+          this.dragEnd = { x: this.mouseX, y: this.mouseY };
+        }
+      });
+
+      cv.addEventListener('mousedown', e => {
+        if (e.button !== 0) return;
+        const pos = this._getCanvasPos(e);
+        this.dragStart = { x: pos.x, y: pos.y };
+        this.dragEnd   = { x: pos.x, y: pos.y };
+        this.isDragging = false;
+      });
+
+      cv.addEventListener('mouseup', e => {
+        if (e.button !== 0) return;
+        const pos = this._getCanvasPos(e);
+        const mx = pos.x, my = pos.y;
+        if (this.isDragging) {
+          this._handleBoxSelect(mx, my);
+        } else {
+          this._handleLeftClick(mx, my);
+        }
+        this.isDragging = false;
+        this.dragStart  = null;
+        this.dragEnd    = null;
+      });
+
+      cv.addEventListener('contextmenu', e => {
+        e.preventDefault();
+        const pos = this._getCanvasPos(e);
+        this._handleRightClick(pos.x, pos.y);
+      });
+    }
+
+    _handleLeftClick(mx, my) {
+      const g = this.game;
+
+      // Check minimap first
+      if (g.minimap.checkClick(mx, my, g.camera, g.canvas.width, g.canvas.height)) return;
+
+      // Check selection panel
+      const panelY = g.canvas.height - PANEL_H;
+      if (my > panelY) {
+        this._handlePanelClick(mx, my);
+        return;
+      }
+
+      const wx = mx + g.camera.x;
+      const wy = my + g.camera.y;
+
+      // Player base
+      const pb = g.playerBase;
+      if (pb.active && wx >= pb.x && wx <= pb.x + 80 && wy >= pb.y && wy <= pb.y + 80) {
+        if (!this.shiftHeld) g.deselectAll();
+        pb.selected = true;
+        return;
+      }
+
+      // AI base
+      const ab = g.aiBase;
+      if (ab.active && wx >= ab.x && wx <= ab.x + 80 && wy >= ab.y && wy <= ab.y + 80) {
+        if (!this.shiftHeld) g.deselectAll();
+        ab.selected = true;
+        return;
+      }
+
+      // Units
+      let best = null, bestD = Infinity;
+      for (const u of g.units) {
+        if (!u.active || u.state === 'dead') continue;
+        const d = dist(wx, wy, u.x, u.y);
+        if (d <= u.radius + 4 && d < bestD) { best = u; bestD = d; }
+      }
+
+      if (best) {
+        if (!this.shiftHeld) g.deselectAll();
+        best.selected = true;
+      } else {
+        if (!this.shiftHeld) g.deselectAll();
+      }
+    }
+
+    _handleBoxSelect(mx, my) {
+      if (!this.dragStart) return;
+      const g = this.game;
+      const x1 = Math.min(this.dragStart.x, mx) + g.camera.x;
+      const y1 = Math.min(this.dragStart.y, my) + g.camera.y;
+      const x2 = Math.max(this.dragStart.x, mx) + g.camera.x;
+      const y2 = Math.max(this.dragStart.y, my) + g.camera.y;
+
+      if (!this.shiftHeld) g.deselectAll();
+      for (const u of g.units) {
+        if (!u.active || u.state === 'dead' || u.faction !== 'player') continue;
+        if (u.x >= x1 && u.x <= x2 && u.y >= y1 && u.y <= y2) u.selected = true;
+      }
+    }
+
+    _handleRightClick(mx, my) {
+      const g = this.game;
+      const panelY = g.canvas.height - PANEL_H;
+      if (my > panelY) return;
+
+      const wx = mx + g.camera.x;
+      const wy = my + g.camera.y;
+
+      const sel = g.units.filter(u => u.selected && u.faction === 'player' && u.active && u.state !== 'dead');
+      if (sel.length === 0) return;
+
+      // Right-click on enemy unit?
+      let enemyTarget = null;
+      for (const u of g.units) {
+        if (!u.active || u.state === 'dead' || u.faction !== 'ai') continue;
+        if (dist(wx, wy, u.x, u.y) <= u.radius + 6) { enemyTarget = u; break; }
+      }
+
+      // Right-click near AI base?
+      const ab = g.aiBase;
+      const nearBase = ab.active && dist(wx, wy, ab.x + 40, ab.y + 40) < 130;
+
+      if (enemyTarget) {
+        for (const u of sel) {
+          u.target = enemyTarget;
+          u.targetBuilding = null;
+          u.waypoint = null;
+          u.state = 'chase';
+        }
+      } else if (nearBase) {
+        for (const u of sel) {
+          u.targetBuilding = ab;
+          u.target = null;
+          u.waypoint = { x: ab.x + 40 + randRange(-30, 30), y: ab.y + 40 + randRange(-30, 30) };
+          u.state = 'moving';
+        }
+      } else {
+        // Formation move
+        const cols = Math.ceil(Math.sqrt(sel.length));
+        sel.forEach((u, idx) => {
+          const col = idx % cols;
+          const row = Math.floor(idx / cols);
+          u.waypoint = {
+            x: clamp(wx + (col - (cols - 1) / 2) * 32, 20, WORLD_W - 20),
+            y: clamp(wy + row * 32, 20, WORLD_H - 20)
+          };
+          u.target = null;
+          u.targetBuilding = null;
+          u.state = 'moving';
+        });
+      }
+    }
+
+    _handlePanelClick(mx, my) {
+      const g = this.game;
+      if (!g.playerBase.selected || !g.playerBase.active) return;
+
+      const canvasW = g.canvas.width;
+      const panelY  = g.canvas.height - PANEL_H;
+      const btnY    = panelY + 38;
+      const btnH    = 40;
+      const btnW    = 130;
+      const gap     = 15;
+      const totalW  = 3 * btnW + 2 * gap;
+      const startX  = (canvasW - totalW) / 2;
+
+      const types = ['spaceMarine', 'terminator', 'scout'];
+      for (let i = 0; i < types.length; i++) {
+        const bx = startX + i * (btnW + gap);
+        if (mx >= bx && mx <= bx + btnW && my >= btnY && my <= btnY + btnH) {
+          g.playerBase.startProduction(types[i]);
+          break;
+        }
+      }
+    }
+
+    updateCamera(delta, camera, canvasW, canvasH) {
+      let dx = 0, dy = 0;
+      if (this.keys['w'] || this.keys['W'] || this.keys['ArrowUp'])    dy -= 1;
+      if (this.keys['s'] || this.keys['S'] || this.keys['ArrowDown'])  dy += 1;
+      if (this.keys['a'] || this.keys['A'] || this.keys['ArrowLeft'])  dx -= 1;
+      if (this.keys['d'] || this.keys['D'] || this.keys['ArrowRight']) dx += 1;
+
+      if (this.mouseOnCanvas) {
+        if (this.mouseX < EDGE_MARGIN)             dx -= 1;
+        if (this.mouseX > canvasW - EDGE_MARGIN)   dx += 1;
+        if (this.mouseY < EDGE_MARGIN)             dy -= 1;
+        if (this.mouseY > canvasH - EDGE_MARGIN)   dy += 1;
+      }
+
+      if (dx !== 0 || dy !== 0) {
+        const len = Math.sqrt(dx * dx + dy * dy);
+        camera.x += (dx / len) * CAMERA_SPEED * delta;
+        camera.y += (dy / len) * CAMERA_SPEED * delta;
+      }
+    }
+  }
+
+  // ============================================================
+  // 11. CAMERA
+  // ============================================================
+  class Camera {
+    // Position is set to player base center in Game.start() and restart()
+    constructor() { this.x = 0; this.y = 0; }
+
+    clamp(canvasW, canvasH) {
+      this.x = clamp(this.x, 0, Math.max(0, WORLD_W - canvasW));
+      this.y = clamp(this.y, 0, Math.max(0, WORLD_H - canvasH));
+    }
+  }
+
+  // ============================================================
+  // 12. MINIMAP
+  // ============================================================
+  class Minimap {
+    getRect(canvasW, canvasH) {
+      return {
+        x: canvasW - MINIMAP_W - MINIMAP_MARGIN,
+        y: canvasH - PANEL_H - MINIMAP_H - MINIMAP_MARGIN,
+        w: MINIMAP_W,
+        h: MINIMAP_H
+      };
+    }
+
+    _toMini(wx, wy, rect) {
+      return {
+        x: rect.x + (wx / WORLD_W) * rect.w,
+        y: rect.y + (wy / WORLD_H) * rect.h
+      };
+    }
+
+    checkClick(mx, my, camera, canvasW, canvasH) {
+      const rect = this.getRect(canvasW, canvasH);
+      if (mx < rect.x || mx > rect.x + rect.w || my < rect.y || my > rect.y + rect.h) return false;
+      const wx = ((mx - rect.x) / rect.w) * WORLD_W;
+      const wy = ((my - rect.y) / rect.h) * WORLD_H;
+      camera.x = wx - canvasW / 2;
+      camera.y = wy - canvasH / 2;
+      return true;
+    }
+
+    draw(ctx, game) {
+      const canvasW = game.canvas.width;
+      const canvasH = game.canvas.height;
+      const rect    = this.getRect(canvasW, canvasH);
+
+      ctx.save();
+
+      // Background
+      ctx.fillStyle = '#050510';
+      ctx.fillRect(rect.x, rect.y, rect.w, rect.h);
+      ctx.strokeStyle = '#334466';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(rect.x, rect.y, rect.w, rect.h);
+
+      // Obstacles
+      ctx.fillStyle = '#2a3a2a';
+      for (const o of game.obstacles.obstacles) {
+        const m = this._toMini(o.x, o.y, rect);
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Player base
+      if (game.playerBase.active) {
+        const m = this._toMini(game.playerBase.x, game.playerBase.y, rect);
+        ctx.strokeStyle = '#4466ff';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(m.x - 4, m.y - 4, 8, 8);
+        ctx.fillStyle = 'rgba(68,102,255,0.3)';
+        ctx.fillRect(m.x - 4, m.y - 4, 8, 8);
+      }
+
+      // AI base
+      if (game.aiBase.active) {
+        const m = this._toMini(game.aiBase.x, game.aiBase.y, rect);
+        ctx.strokeStyle = '#ff3333';
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(m.x - 4, m.y - 4, 8, 8);
+        ctx.fillStyle = 'rgba(255,51,51,0.3)';
+        ctx.fillRect(m.x - 4, m.y - 4, 8, 8);
+      }
+
+      // Units
+      for (const u of game.units) {
+        if (!u.active || u.state === 'dead') continue;
+        const m = this._toMini(u.x, u.y, rect);
+        ctx.fillStyle = u.faction === 'player' ? '#4488ff' : '#ff4444';
+        ctx.beginPath();
+        ctx.arc(m.x, m.y, 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      // Viewport rectangle
+      const vx = rect.x + (game.camera.x / WORLD_W) * rect.w;
+      const vy = rect.y + (game.camera.y / WORLD_H) * rect.h;
+      const vw = (canvasW / WORLD_W) * rect.w;
+      const vh = (canvasH / WORLD_H) * rect.h;
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(vx, vy, vw, vh);
+
+      ctx.restore();
+    }
+  }
+
+  // ============================================================
+  // 13. UI
+  // ============================================================
+  class UI {
+    draw(ctx, game) {
+      this._drawTopBar(ctx, game);
+      this._drawSelectionPanel(ctx, game);
+      this._drawWaveNotification(ctx, game);
+      this._drawTooltip(ctx, game);
+      this._drawDragBox(ctx, game);
+    }
+
+    _drawTopBar(ctx, game) {
+      const W = game.canvas.width;
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.78)';
+      ctx.fillRect(0, 0, W, 40);
+
+      ctx.font = 'bold 14px Courier New';
+      ctx.textBaseline = 'middle';
+
+      ctx.fillStyle = '#ffcc00';
+      ctx.textAlign = 'left';
+      ctx.fillText('\u26A1 Minerals: ' + Math.floor(game.minerals), 15, 20);
+
+      ctx.fillStyle = '#aaccff';
+      ctx.textAlign = 'center';
+      ctx.fillText('Wave ' + game.waveNumber + '  \u2014  Space Marines vs Chaos', W / 2, 20);
+
+      ctx.fillStyle = '#44ff88';
+      ctx.textAlign = 'right';
+      ctx.fillText('Score: ' + game.score, W - 15, 20);
+
+      ctx.restore();
+    }
+
+    _drawSelectionPanel(ctx, game) {
+      const W      = game.canvas.width;
+      const H      = game.canvas.height;
+      const panelY = H - PANEL_H;
+
+      ctx.save();
+      ctx.fillStyle = '#111122';
+      ctx.fillRect(0, panelY, W, PANEL_H);
+      ctx.strokeStyle = '#334466';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, panelY);
+      ctx.lineTo(W, panelY);
+      ctx.stroke();
+
+      const selUnits = game.units.filter(u => u.selected && u.active && u.state !== 'dead');
+      const pbSel    = game.playerBase.selected && game.playerBase.active;
+      const abSel    = game.aiBase.selected    && game.aiBase.active;
+
+      if (pbSel) {
+        this._drawPlayerBasePanel(ctx, game, panelY, W);
+      } else if (abSel) {
+        this._drawAIBasePanel(ctx, game, panelY);
+      } else if (selUnits.length === 1) {
+        this._drawSingleUnitPanel(ctx, selUnits[0], panelY);
+      } else if (selUnits.length > 1) {
+        this._drawMultiUnitPanel(ctx, selUnits, panelY);
+      } else {
+        this._drawHints(ctx, panelY, W);
+      }
+
+      ctx.restore();
+    }
+
+    _drawHints(ctx, panelY, W) {
+      ctx.fillStyle = '#6688aa';
+      ctx.textAlign = 'center';
+      ctx.font = '12px Courier New';
+      ctx.textBaseline = 'top';
+      ctx.fillText('Left-click: select unit/building   Drag: box select   Right-click: move / attack', W / 2, panelY + 14);
+      ctx.fillText('WASD / Arrow keys: scroll camera   Select your base to produce units', W / 2, panelY + 34);
+      ctx.fillText('Right-click enemy or enemy base: order attack', W / 2, panelY + 54);
+    }
+
+    _drawSingleUnitPanel(ctx, unit, panelY) {
+      const x = 16;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+
+      ctx.fillStyle = unit.faction === 'player' ? '#5577ff' : '#ff5555';
+      ctx.font = 'bold 15px Courier New';
+      ctx.fillText(unit.name, x, panelY + 10);
+
+      ctx.font = '12px Courier New';
+      const hpRatio = unit.hp / unit.maxHp;
+      ctx.fillStyle = hpRatio > 0.66 ? '#00cc44' : hpRatio > 0.33 ? '#ffcc00' : '#cc2200';
+      ctx.fillText('HP: ' + Math.ceil(unit.hp) + ' / ' + unit.maxHp, x, panelY + 30);
+
+      ctx.fillStyle = '#8899bb';
+      ctx.fillText('State:  ' + unit.state,                          x, panelY + 48);
+      ctx.fillText('Damage: ' + unit.damage + '   Range: ' + unit.range + '   Speed: ' + unit.speed, x, panelY + 66);
+      ctx.fillText('Faction: ' + (unit.faction === 'player' ? 'Space Marines' : 'Chaos'), x, panelY + 84);
+    }
+
+    _drawMultiUnitPanel(ctx, units, panelY) {
+      const x = 16;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+
+      ctx.fillStyle = '#aaccff';
+      ctx.font = 'bold 14px Courier New';
+      ctx.fillText(units.length + ' units selected', x, panelY + 10);
+
+      const counts = {};
+      for (const u of units) counts[u.type] = (counts[u.type] || 0) + 1;
+
+      ctx.font = '12px Courier New';
+      ctx.fillStyle = '#7799aa';
+      let line = 0;
+      for (const [type, cnt] of Object.entries(counts)) {
+        ctx.fillText(UNIT_DEFS[type].name + ': ' + cnt, x, panelY + 32 + line * 17);
+        if (++line >= 4) break;
+      }
+    }
+
+    _drawPlayerBasePanel(ctx, game, panelY, canvasW) {
+      const base = game.playerBase;
+      const x = 16;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+
+      ctx.fillStyle = '#5577ff';
+      ctx.font = 'bold 15px Courier New';
+      ctx.fillText('Space Marine Base', x, panelY + 10);
+
+      ctx.font = '12px Courier New';
+      const hpRatio = base.hp / base.maxHp;
+      ctx.fillStyle = hpRatio > 0.66 ? '#00cc44' : hpRatio > 0.33 ? '#ffcc00' : '#cc2200';
+      ctx.fillText('HP: ' + Math.ceil(base.hp) + ' / ' + base.maxHp, x, panelY + 30);
+
+      ctx.fillStyle = '#ffcc00';
+      ctx.fillText('\u26A1 Minerals: ' + Math.floor(game.minerals), x, panelY + 48);
+
+      if (base.productionQueue.length > 0) {
+        const pct = Math.floor((base.productionTimer / base.productionTime) * 100);
+        ctx.fillStyle = '#44aaff';
+        ctx.fillText(
+          'Producing: ' + UNIT_DEFS[base.productionQueue[0]].name +
+          ' (' + pct + '%)  Queue: ' + base.productionQueue.length,
+          x, panelY + 66
+        );
+      }
+
+      // Buttons
+      const btnY   = panelY + 38;
+      const btnH   = 40;
+      const btnW   = 130;
+      const gap    = 15;
+      const totalW = 3 * btnW + 2 * gap;
+      const startX = (canvasW - totalW) / 2;
+
+      const btns = [
+        { label: 'Space Marine', sub: '\u26A150', type: 'spaceMarine', cost: 50 },
+        { label: 'Terminator',   sub: '\u26A1150', type: 'terminator',  cost: 150 },
+        { label: 'Scout',        sub: '\u26A130', type: 'scout',       cost: 30 }
+      ];
+
+      btns.forEach((btn, i) => {
+        const bx = startX + i * (btnW + gap);
+        const can = game.minerals >= btn.cost;
+        ctx.fillStyle   = can ? '#1a3a6a' : '#252525';
+        ctx.fillRect(bx, btnY, btnW, btnH);
+        ctx.strokeStyle = can ? '#4466aa' : '#444';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(bx, btnY, btnW, btnH);
+
+        ctx.textAlign = 'center';
+        ctx.fillStyle = can ? '#aaccff' : '#555566';
+        ctx.font = '11px Courier New';
+        ctx.fillText(btn.label, bx + btnW / 2, btnY + 12);
+        ctx.fillStyle = can ? '#ffcc00' : '#555544';
+        ctx.fillText(btn.sub, bx + btnW / 2, btnY + 27);
+      });
+    }
+
+    _drawAIBasePanel(ctx, game, panelY) {
+      const base = game.aiBase;
+      const x = 16;
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      ctx.fillStyle = '#ff5555';
+      ctx.font = 'bold 15px Courier New';
+      ctx.fillText('Chaos Base', x, panelY + 10);
+      ctx.font = '12px Courier New';
+      const hpRatio = base.hp / base.maxHp;
+      ctx.fillStyle = hpRatio > 0.66 ? '#00cc44' : hpRatio > 0.33 ? '#ffcc00' : '#cc2200';
+      ctx.fillText('HP: ' + Math.ceil(base.hp) + ' / ' + base.maxHp, x, panelY + 30);
+      ctx.fillStyle = '#8899bb';
+      ctx.fillText('DESTROY THIS BASE TO WIN', x, panelY + 50);
+    }
+
+    _drawWaveNotification(ctx, game) {
+      if (game.waveNotifyTimer <= 0) return;
+      const alpha = Math.min(1, game.waveNotifyTimer);
+      const W = game.canvas.width;
+      ctx.save();
+      ctx.globalAlpha = alpha;
+      ctx.font = 'bold 28px Courier New';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.shadowBlur = 20;
+      ctx.shadowColor = '#ff4400';
+      ctx.fillStyle = '#ff8844';
+      ctx.fillText('⚔ WAVE ' + game.waveNumber + ' INCOMING! ⚔', W / 2, 80);
+      ctx.restore();
+    }
+
+    _drawTooltip(ctx, game) {
+      const mx = game.input.mouseX;
+      const my = game.input.mouseY;
+      const wx = mx + game.camera.x;
+      const wy = my + game.camera.y;
+
+      let hovered = null;
+      for (const u of game.units) {
+        if (!u.active || u.state === 'dead') continue;
+        if (dist(wx, wy, u.x, u.y) <= u.radius + 4) { hovered = u; break; }
+      }
+      if (!hovered) return;
+
+      const lines = [
+        hovered.name,
+        'HP: ' + Math.ceil(hovered.hp) + ' / ' + hovered.maxHp,
+        'Faction: ' + (hovered.faction === 'player' ? 'Space Marines' : 'Chaos'),
+        'State: ' + hovered.state
+      ];
+
+      const tw = 170, lh = 18, pad = 8;
+      const th = lines.length * lh + pad * 2;
+      let tx = mx + 16;
+      let ty = my - th - 6;
+      const cW = game.canvas.width;
+      if (tx + tw > cW)  tx = mx - tw - 6;
+      if (ty < 44)       ty = my + 16;
+
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.88)';
+      ctx.fillRect(tx, ty, tw, th);
+      ctx.strokeStyle = hovered.faction === 'player' ? '#4466ff' : '#ff4444';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(tx, ty, tw, th);
+
+      ctx.textBaseline = 'top';
+      ctx.textAlign = 'left';
+      lines.forEach((ln, i) => {
+        ctx.font = i === 0 ? 'bold 12px Courier New' : '12px Courier New';
+        ctx.fillStyle = i === 0
+          ? (hovered.faction === 'player' ? '#5588ff' : '#ff6666')
+          : '#aabbcc';
+        ctx.fillText(ln, tx + pad, ty + pad + i * lh);
+      });
+      ctx.restore();
+    }
+
+    _drawDragBox(ctx, game) {
+      const inp = game.input;
+      if (!inp.isDragging || !inp.dragStart || !inp.dragEnd) return;
+      const x = Math.min(inp.dragStart.x, inp.dragEnd.x);
+      const y = Math.min(inp.dragStart.y, inp.dragEnd.y);
+      const w = Math.abs(inp.dragEnd.x - inp.dragStart.x);
+      const h = Math.abs(inp.dragEnd.y - inp.dragStart.y);
+      ctx.save();
+      ctx.strokeStyle = '#44ff88';
+      ctx.lineWidth = 1.5;
+      ctx.setLineDash([5, 5]);
+      ctx.strokeRect(x, y, w, h);
+      ctx.fillStyle = 'rgba(68,255,136,0.05)';
+      ctx.fillRect(x, y, w, h);
+      ctx.setLineDash([]);
+      ctx.restore();
+    }
+  }
+
+  // ============================================================
+  // 14. GAME CLASS
+  // ============================================================
+  class Game {
+    constructor() {
+      this.canvas = document.getElementById('gameCanvas');
+      this.ctx    = this.canvas.getContext('2d');
+      this.lastTime = 0;
+
+      this.minerals         = 200;
+      this.score            = 0;
+      this.waveNumber       = 0;
+      this.waveNotifyTimer  = 0;
+      this.mineralTimer     = 0;
+      this.gameOver         = false;
+
+      this.stars       = [];
+      this.units       = [];
+      this.projectiles = [];
+
+      this.camera      = new Camera();
+      this.particles   = new ParticleSystem();
+      this.obstacles   = new ObstacleSystem();
+      this.spatialGrid = new SpatialGrid(200);
+      this.minimap     = new Minimap();
+      this.ui          = new UI();
+      this.input       = new InputHandler(this);
+
+      this.playerBase = new Building('playerBase', 160, 1660, this);
+      this.aiBase     = new Building('aiBase',     1710, 210,  this);
+      this.aiManager  = new AIManager(this);
+
+      this._generateStars();
+      this._spawnInitialUnits();
+      this._setupOverlay();
+
+      this.resize();
+      window.addEventListener('resize', () => this.resize());
+    }
+
+    resize() {
+      this.canvas.width  = window.innerWidth;
+      this.canvas.height = window.innerHeight;
+    }
+
+    _generateStars() {
+      for (let i = 0; i < 200; i++) {
+        this.stars.push({
+          x: Math.random() * WORLD_W,
+          y: Math.random() * WORLD_H,
+          size: randRange(0.5, 2.5),
+          brightness: randRange(0.35, 1.0)
+        });
+      }
+    }
+
+    _spawnInitialUnits() {
+      const starts = [
+        { x: 280, y: 1680 },
+        { x: 310, y: 1720 },
+        { x: 250, y: 1740 }
+      ];
+      for (const s of starts) {
+        const u = new Unit('spaceMarine', s.x, s.y, this);
+        u.selected = true;
+        this.units.push(u);
+      }
+    }
+
+    _setupOverlay() {
+      document.getElementById('restart-btn').addEventListener('click', () => {
+        document.getElementById('overlay').classList.remove('active');
+        this.restart();
+      });
+    }
+
+    restart() {
+      this.minerals        = 200;
+      this.score           = 0;
+      this.waveNumber      = 0;
+      this.waveNotifyTimer = 0;
+      this.mineralTimer    = 0;
+      this.gameOver        = false;
+      this.units           = [];
+      this.projectiles     = [];
+
+      this.particles   = new ParticleSystem();
+      this.obstacles   = new ObstacleSystem();
+      this.playerBase  = new Building('playerBase', 160, 1660, this);
+      this.aiBase      = new Building('aiBase',     1710, 210,  this);
+      this.aiManager   = new AIManager(this);
+      this.camera      = new Camera();
+      this.camera.x = this.playerBase.x + 40 - this.canvas.width / 2;
+      this.camera.y = this.playerBase.y + 40 - this.canvas.height / 2;
+      this.camera.clamp(this.canvas.width, this.canvas.height);
+
+      _uidCounter = 0;
+      this._spawnInitialUnits();
+    }
+
+    deselectAll() {
+      for (const u of this.units) u.selected = false;
+      this.playerBase.selected = false;
+      this.aiBase.selected     = false;
+    }
+
+    update(delta) {
+      if (this.gameOver) return;
+
+      // Win / loss check
+      if (!this.playerBase.active) { this._endGame(false); return; }
+      if (!this.aiBase.active)     { this._endGame(true);  return; }
+
+      // Camera
+      this.input.updateCamera(delta, this.camera, this.canvas.width, this.canvas.height);
+      this.camera.clamp(this.canvas.width, this.canvas.height);
+
+      // Mineral regen
+      this.mineralTimer += delta;
+      if (this.mineralTimer >= 1) {
+        this.mineralTimer -= 1;
+        this.minerals += MINERAL_REGEN;
+      }
+
+      this.waveNotifyTimer = Math.max(0, this.waveNotifyTimer - delta);
+
+      // Rebuild spatial grid
+      this.spatialGrid.clear();
+      for (const u of this.units) {
+        if (u.active && u.state !== 'dead') this.spatialGrid.insert(u);
+      }
+
+      // Update buildings
+      this.playerBase.update(delta);
+      this.aiBase.update(delta);
+
+      // Update units
+      for (const u of this.units) {
+        u.update(delta, this.spatialGrid, this.obstacles, this.projectiles, this.particles);
+      }
+
+      // Remove fully dead units
+      this.units = this.units.filter(u => u.active);
+
+      // Update projectiles
+      for (const p of this.projectiles) {
+        p.update(delta, this.units, this.playerBase, this.aiBase, this.particles);
+      }
+      this.projectiles = this.projectiles.filter(p => p.active);
+
+      // Update particles
+      this.particles.update(delta);
+
+      // AI manager
+      this.aiManager.update(delta);
+    }
+
+    _endGame(victory) {
+      this.gameOver = true;
+      const overlay = document.getElementById('overlay');
+      const title   = document.getElementById('overlay-title');
+      const scoreEl = document.getElementById('overlay-score');
+      if (victory) {
+        title.textContent  = '\u2694 VICTORY \u2694';
+        title.style.color  = '#44ff88';
+        document.getElementById('overlay-box').style.borderColor = '#44ff88';
+      } else {
+        title.textContent  = '\uD83D\uDC80 DEFEAT \uD83D\uDC80';
+        title.style.color  = '#ff4444';
+        document.getElementById('overlay-box').style.borderColor = '#ff4444';
+      }
+      scoreEl.textContent = 'Final Score: ' + this.score;
+      overlay.classList.add('active');
+    }
+
+    draw() {
+      const ctx     = this.ctx;
+      const camera  = this.camera;
+      const canvasW = this.canvas.width;
+      const canvasH = this.canvas.height;
+
+      // Background
+      ctx.fillStyle = '#0a0a1a';
+      ctx.fillRect(0, 0, canvasW, canvasH);
+
+      // Stars
+      for (const s of this.stars) {
+        const sx = s.x - camera.x;
+        const sy = s.y - camera.y;
+        if (sx < -3 || sx > canvasW + 3 || sy < -3 || sy > canvasH + 3) continue;
+        ctx.globalAlpha = s.brightness;
+        ctx.fillStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(sx, sy, s.size, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+
+      // Grid lines
+      ctx.strokeStyle = '#162616';
+      ctx.lineWidth   = 0.5;
+      const gx0 = Math.floor(camera.x / GRID_STEP) * GRID_STEP;
+      const gy0 = Math.floor(camera.y / GRID_STEP) * GRID_STEP;
+      for (let gx = gx0; gx <= camera.x + canvasW; gx += GRID_STEP) {
+        ctx.beginPath();
+        ctx.moveTo(gx - camera.x, 0);
+        ctx.lineTo(gx - camera.x, canvasH);
+        ctx.stroke();
+      }
+      for (let gy = gy0; gy <= camera.y + canvasH; gy += GRID_STEP) {
+        ctx.beginPath();
+        ctx.moveTo(0, gy - camera.y);
+        ctx.lineTo(canvasW, gy - camera.y);
+        ctx.stroke();
+      }
+
+      // Obstacles
+      this.obstacles.draw(ctx, camera);
+
+      // Buildings
+      this.playerBase.draw(ctx, camera);
+      this.aiBase.draw(ctx, camera);
+
+      // Units — dead first, then alive (so dead render under living)
+      for (const u of this.units) { if (u.state === 'dead')  u.draw(ctx, camera); }
+      for (const u of this.units) { if (u.state !== 'dead') u.draw(ctx, camera); }
+
+      // Projectiles
+      for (const p of this.projectiles) p.draw(ctx, camera);
+
+      // Particles
+      this.particles.draw(ctx, camera);
+
+      // UI (screen-space)
+      this.ui.draw(ctx, this);
+
+      // Minimap
+      this.minimap.draw(ctx, this);
+    }
+
+    gameLoop(timestamp) {
+      const delta = Math.min((timestamp - this.lastTime) / 1000, MAX_DELTA_TIME);
+      this.lastTime = timestamp;
+      this.update(delta);
+      this.draw();
+      requestAnimationFrame(this.gameLoop.bind(this));
+    }
+
+    start() {
+      // Center camera on the player base
+      this.camera.x = this.playerBase.x + 40 - this.canvas.width / 2;
+      this.camera.y = this.playerBase.y + 40 - this.canvas.height / 2;
+      this.camera.clamp(this.canvas.width, this.canvas.height);
+      requestAnimationFrame(ts => {
+        this.lastTime = ts;
+        this.gameLoop(ts);
+      });
+    }
+  }
+
+  // ============================================================
+  // 15. BOOTSTRAP
+  // ============================================================
+  window.addEventListener('load', () => {
+    const game = new Game();
+    game.start();
+  });
+  </script>
+</body>
+</html>
