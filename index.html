@@ -1163,14 +1163,15 @@
   // ============================================================
   class InputHandler {
     constructor(game) {
-      this.game       = game;
-      this.keys       = {};
-      this.mouseX     = 0;
-      this.mouseY     = 0;
-      this.shiftHeld  = false;
-      this.isDragging = false;
-      this.dragStart  = null;
-      this.dragEnd    = null;
+      this.game          = game;
+      this.keys          = {};
+      this.mouseX        = -999;   // off-screen to prevent edge-scroll before first move
+      this.mouseY        = -999;
+      this.mouseOnCanvas = false;
+      this.shiftHeld     = false;
+      this.isDragging    = false;
+      this.dragStart     = null;
+      this.dragEnd       = null;
       this._bind();
     }
 
@@ -1196,6 +1197,9 @@
       });
 
       const cv = this.game.canvas;
+
+      cv.addEventListener('mouseenter', () => { this.mouseOnCanvas = true; });
+      cv.addEventListener('mouseleave', () => { this.mouseOnCanvas = false; });
 
       cv.addEventListener('mousemove', e => {
         const pos = this._getCanvasPos(e);
@@ -1384,10 +1388,12 @@
       if (this.keys['a'] || this.keys['A'] || this.keys['ArrowLeft'])  dx -= 1;
       if (this.keys['d'] || this.keys['D'] || this.keys['ArrowRight']) dx += 1;
 
-      if (this.mouseX < EDGE_MARGIN)             dx -= 1;
-      if (this.mouseX > canvasW - EDGE_MARGIN)   dx += 1;
-      if (this.mouseY < EDGE_MARGIN)             dy -= 1;
-      if (this.mouseY > canvasH - EDGE_MARGIN)   dy += 1;
+      if (this.mouseOnCanvas) {
+        if (this.mouseX < EDGE_MARGIN)             dx -= 1;
+        if (this.mouseX > canvasW - EDGE_MARGIN)   dx += 1;
+        if (this.mouseY < EDGE_MARGIN)             dy -= 1;
+        if (this.mouseY > canvasH - EDGE_MARGIN)   dy += 1;
+      }
 
       if (dx !== 0 || dy !== 0) {
         const len = Math.sqrt(dx * dx + dy * dy);
